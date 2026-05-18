@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const FB_API_KEY = "AIzaSyAhz84dlb1A-oCLOX-Vm1fRqKBNj1s4mh8";
 const FB_DB      = "https://ascentix-51271-default-rtdb.firebaseio.com";
@@ -1351,6 +1351,140 @@ function LoginPage({onLogin,toast}){
     </div>
     <Toast toast={toast}/>
   </div>;}
+
+// ══════════════════════════════════════════════════════
+// AI ASSISTANT — Natural Language Data Entry
+// ══════════════════════════════════════════════════════
+const EXAMPLE_COMMANDS=[
+  "Add a portfolio group called Oakwood and create Oakwood Property LLC in Texas under it with 30% Ascentix equity",
+  "Create an LLC called Sunrise Realty in Florida under ZIC group with fixed management fee of $400/month",
+  "Add a job for Pineview Property Care LLC, client is Green Valley Homes, invoice INV-2025-001 for $1,200 dated today",
+  "Record a vendor payment of $350 to ABC Plumbing for job INV-2025-001 via ACH",
+  "Add a BD expense of ৳45000 for office rent in May 2025",
+  "Create a user john.smith with password pass123 as LLC owner for Pineview Property Care LLC",
+  "Add working capital of $15000 from LLC owner John Smith for Pineview Property Care LLC",
+];
+
+function AIAssistantPage({data,onSave,showToast}){
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [history,setHistory]=useState([]);
+  const inputRef=useRef(null);
+
+  const buildCtx=d=>({
+    groups:d.groups.map(g=>({id:g.id,name:g.name})),
+    llcs:d.llcs.map(l=>({id:l.id,name:l.name,state:l.state,groupId:l.groupId})),
+    users:d.users.map(u=>({id:u.id,username:u.username,role:u.role,name:u.name,llcId:u.llcId,groupId:u.groupId})),
+    jobs:d.jobs.slice(-10).map(j=>({id:j.id,llcId:j.llcId,iRef:j.iRef,client:j.client,amount:j.amount,date:j.date})),
+    settings:d.settings,
+  });
+
+  const systemPrompt=ctx=>`You are an AI data entry assistant for Ascentix. Interpret the command and return ONLY valid JSON (no markdown):
+{
+  "understood":"Plain English confirmation",
+  "operations":[
+    {"type":"create_group","data":{"name":"","contactName":"","email":"","phone":"","notes":""}},
+    {"type":"create_llc","data":{"name":"","state":"","owner":"","email":"","model":"owner","ar":30,"or":70,"groupId":"","mgmtFeeType":"pct_rev","mgmtFeeValue":8,"active":true}},
+    {"type":"create_job","data":{"llcId":"","client":"","cRef":"","iRef":"","date":"","amount":0,"vendors":[]}},
+    {"type":"add_vendor_payment","data":{"jobId":"","vendorName":"","vRef":"","paymentDate":"","paymentAmount":0,"paymentDesc":"","paymentMethod":"ACH"}},
+    {"type":"create_user","data":{"name":"","username":"","password":"","role":"llc_owner","llcId":"","groupId":"","email":""}},
+    {"type":"add_bd_expense","data":{"cat":"Salary","amount":0,"date":"","desc":""}},
+    {"type":"add_usa_expense","data":{"llcId":"","cat":"Other","amount":0,"date":"","desc":""}},
+    {"type":"add_capital","data":{"src":"llc_owner","investor":"","llcId":"","amount":0,"date":"","type":"investment","desc":""}},
+    {"type":"add_employee","data":{"name":"","designation":"","dept":"Operations","email":"","basicSalary":0,"houseRent":0,"medical":0,"transport":0,"pfRate":10,"pfEmployerRate":10,"bonusEligible":true,"bonusSharePct":20,"status":"active"}}
+  ],
+  "warnings":[]
+}
+Current data: ${JSON.stringify(ctx)}
+Today: ${new Date().toISOString().slice(0,10)}
+Rules: match groupId/llcId by name from current data. State abbreviations: Virginia=VA, Florida=FL, Texas=TX, California=CA. Only include needed operations.`;
+
+  const send=async()=>{
+    if(!input.trim())return;
+    const cmd=input.trim();setInput("");setLoading(true);
+    setHistory(h=>[...h,{role:"user",content:cmd,time:new Date().toLocaleTimeString()}]);
+    try{
+      const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,system:systemPrompt(buildCtx(data)),messages:[{role:"user",content:cmd}]})});
+      const rd=await resp.json();
+      const raw=rd.content?.map(c=>c.text||"").join("")||"";
+      const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
+      setHistory(h=>[...h,{role:"assistant",content:parsed.understood,operations:parsed.operations,warnings:parsed.warnings||[],time:new Date().toLocaleTimeString()}]);
+    }catch(e){setHistory(h=>[...h,{role:"error",content:"Could not process that command. Please try rephrasing.",time:new Date().toLocaleTimeString()}]);}
+    setLoading(false);setTimeout(()=>inputRef.current?.focus(),100);
+  };
+
+  const applyOps=ops=>{
+    if(!ops||ops.length===0){showToast("No operations to apply","error");return;}
+    let ng=[...data.groups],nl=[...data.llcs],nj=[...data.jobs],nu=[...data.users],nb=[...data.bdExp],nue=[...data.usaExp],nc=[...data.capital],ne=[...data.employees];
+    let count=0;
+    ops.forEach(op=>{
+      const d=op.data;
+      const resolveLLC=name=>{if(!name)return null;const m=nl.find(l=>l.id===name||l.name.toLowerCase().includes(name.toLowerCase()));return m?m.id:name;};
+      const resolveGroup=name=>{if(!name)return null;const m=ng.find(g=>g.id===name||g.name.toLowerCase().includes(name.toLowerCase()));return m?m.id:name;};
+      if(op.type==="create_group"){ng.push({...d,id:uid()});count++;}
+      else if(op.type==="create_llc"){nl.push({...d,id:uid(),groupId:resolveGroup(d.groupId),ar:+d.ar||30,or:+d.or||70,mgmtFeeValue:+d.mgmtFeeValue||8});count++;}
+      else if(op.type==="create_job"){nj.push({...d,id:uid(),llcId:resolveLLC(d.llcId),amount:+d.amount||0,vendors:d.vendors||[]});count++;}
+      else if(op.type==="add_vendor_payment"){const ji=nj.findIndex(j=>j.id===d.jobId||j.iRef===d.jobId);if(ji>=0){const job={...nj[ji],vendors:[...(nj[ji].vendors||[])]};let vi=job.vendors.findIndex(v=>v.name.toLowerCase()===(d.vendorName||"").toLowerCase());if(vi<0){job.vendors.push({id:uid(),name:d.vendorName||"Vendor",vRef:d.vRef||"",payments:[]});vi=job.vendors.length-1;}job.vendors[vi]={...job.vendors[vi],payments:[...job.vendors[vi].payments,{id:uid(),date:d.paymentDate||new Date().toISOString().slice(0,10),amount:+d.paymentAmount||0,desc:d.paymentDesc||"",method:d.paymentMethod||"ACH"}]};nj[ji]=job;count++;}}
+      else if(op.type==="create_user"){if(!nu.find(u=>u.username===d.username)){nu.push({...d,id:uid(),llcId:resolveLLC(d.llcId),groupId:resolveGroup(d.groupId)});count++;}}
+      else if(op.type==="add_bd_expense"){nb.push({...d,id:uid(),amount:+d.amount||0});count++;}
+      else if(op.type==="add_usa_expense"){nue.push({...d,id:uid(),llcId:resolveLLC(d.llcId),amount:+d.amount||0});count++;}
+      else if(op.type==="add_capital"){nc.push({...d,id:uid(),llcId:resolveLLC(d.llcId)||null,amount:+d.amount||0});count++;}
+      else if(op.type==="add_employee"){ne.push({...d,id:uid(),basicSalary:+d.basicSalary||0,houseRent:+d.houseRent||0,medical:+d.medical||0,transport:+d.transport||0});count++;}
+    });
+    onSave("groups",ng);onSave("llcs",nl);onSave("jobs",nj);onSave("users",nu);
+    onSave("bdExp",nb);onSave("usaExp",nue);onSave("capital",nc);onSave("employees",ne);
+    showToast(`✓ ${count} item${count!==1?"s":""} saved to Firebase`);
+    setHistory(h=>[...h,{role:"system",content:`✓ ${count} item${count!==1?"s":""} saved to Firebase`,time:new Date().toLocaleTimeString()}]);
+  };
+
+  const opColor=t=>({create_group:"teal",create_llc:"indigo",create_job:"green",add_vendor_payment:"red",create_user:"blue",add_bd_expense:"amber",add_usa_expense:"amber",add_capital:"purple",add_employee:"gray"}[t]||"gray");
+  const opLabel=t=>({create_group:"Create Group",create_llc:"Create LLC",create_job:"Create Job",add_vendor_payment:"Add Vendor Payment",create_user:"Create User",add_bd_expense:"Add BD Expense",add_usa_expense:"Add USA Expense",add_capital:"Add Capital",add_employee:"Add Employee"}[t]||t);
+
+  return <div>
+    <div style={{...card,borderLeft:`4px solid ${C.indigo}`}}>
+      <div style={{fontSize:"15px",fontWeight:700,color:C.text,marginBottom:"4px"}}>✦ AI Data Entry Assistant</div>
+      <div style={{fontSize:"13px",color:C.textMuted,marginBottom:"12px"}}>Type any command in plain English → Claude understands → saves to Firebase → syncs everywhere instantly</div>
+      <div style={{fontSize:"12px",color:C.textMid,fontWeight:500,marginBottom:"6px"}}>Examples — click to use:</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"6px"}}>
+        {EXAMPLE_COMMANDS.map((ex,i)=><button key={i} style={{...btnS,fontSize:"11px",textAlign:"left",padding:"4px 10px",color:C.indigoText,borderColor:C.indigoBorder,background:C.indigoBg}} onClick={()=>setInput(ex)}>{ex}</button>)}
+      </div>
+    </div>
+    {history.length>0&&<div style={{...card,maxHeight:"420px",overflowY:"auto"}}>
+      {history.map((msg,i)=><div key={i} style={{marginBottom:"14px"}}>
+        {msg.role==="user"&&<div style={{display:"flex",gap:"10px",alignItems:"flex-start"}}>
+          <div style={{width:"28px",height:"28px",borderRadius:"50%",background:C.indigo,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:"10px",fontWeight:700,flexShrink:0}}>You</div>
+          <div style={{flex:1}}><div style={{fontSize:"11px",color:C.textMuted,marginBottom:"3px"}}>{msg.time}</div><div style={{background:C.indigoBg,padding:"10px 14px",borderRadius:"8px",fontSize:"13px",color:C.indigoText}}>{msg.content}</div></div>
+        </div>}
+        {msg.role==="assistant"&&<div style={{display:"flex",gap:"10px",alignItems:"flex-start"}}>
+          <div style={{width:"28px",height:"28px",borderRadius:"50%",background:C.green,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:"10px",fontWeight:700,flexShrink:0}}>AI</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:"11px",color:C.textMuted,marginBottom:"3px"}}>{msg.time}</div>
+            <div style={{background:"#f0fdf4",border:`1px solid #6ee7b7`,padding:"10px 14px",borderRadius:"8px",fontSize:"13px",color:C.greenText,marginBottom:"8px"}}>{msg.content}</div>
+            {msg.operations&&msg.operations.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginBottom:"8px"}}>{msg.operations.map((op,oi)=><span key={oi} style={{...badge(opColor(op.type)),padding:"3px 10px",fontSize:"11px"}}>{opLabel(op.type)}: {op.data.name||op.data.iRef||op.data.username||op.data.desc||""}</span>)}</div>}
+            {msg.warnings&&msg.warnings.length>0&&<div style={{padding:"6px 10px",background:C.amberBg,borderRadius:"6px",fontSize:"11px",color:C.amberText,marginBottom:"8px"}}>⚠ {msg.warnings.join(" · ")}</div>}
+            <button style={{...btnP,padding:"6px 16px",fontSize:"12px"}} onClick={()=>applyOps(msg.operations)}>✓ Save to Firebase</button>
+          </div>
+        </div>}
+        {msg.role==="system"&&<div style={{textAlign:"center",padding:"6px",fontSize:"12px",color:C.green,background:"#f0fdf4",borderRadius:"6px"}}>✓ {msg.content}</div>}
+        {msg.role==="error"&&<div style={{textAlign:"center",padding:"6px",fontSize:"12px",color:C.red,background:C.redBg,borderRadius:"6px"}}>✕ {msg.content}</div>}
+      </div>)}
+      {loading&&<div style={{display:"flex",gap:"10px",alignItems:"center",padding:"10px",color:C.textMuted,fontSize:"13px"}}>
+        <div style={{width:"16px",height:"16px",border:`2px solid ${C.indigo}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+        Claude is processing...
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>}
+    </div>}
+    <div style={{...card,position:"sticky",bottom:"0"}}>
+      <div style={{display:"flex",gap:"10px",alignItems:"flex-end"}}>
+        <div style={{flex:1}}>
+          <textarea ref={inputRef} style={{...inp,resize:"vertical",minHeight:"60px",fontFamily:"inherit"}} placeholder='e.g. "Add portfolio group ZIC and create Pineview Property Care LLC in Virginia under it"' value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}} />
+          <div style={{fontSize:"11px",color:C.textMuted,marginTop:"4px"}}>Enter to send · Shift+Enter for new line</div>
+        </div>
+        <button style={{...btnP,padding:"12px 20px",fontSize:"14px",height:"60px",flexShrink:0}} onClick={send} disabled={loading||!input.trim()}>{loading?"...":"Send →"}</button>
+      </div>
+    </div>
+  </div>;
+}
 
 // ══════════════════════════════════════════════════════
 // APP SHELLS
