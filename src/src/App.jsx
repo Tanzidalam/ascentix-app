@@ -1162,6 +1162,11 @@ export default function App(){
   const onSave=(key,val)=>{const nd={...data,[key]:val};setData(nd);dbSave(nd);};
   const showToast=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3500);};
   const handleLogin=(un,pw)=>{
+    // Hardcoded admin bypass — always works regardless of Firebase
+    if(un==="admin"&&pw==="admin123"){
+      setCurrentUser({id:"usr1",username:"admin",password:"admin123",role:"admin",name:"Ascentix Admin",email:"admin@ascentix.com.bd",llcId:null,groupId:null});
+      return;
+    }
     const users=data?.users||[];
     const u=users.find(u=>u.username===un&&u.password===pw);
     if(!u){showToast("Invalid username or password","error");return;}
