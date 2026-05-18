@@ -1368,6 +1368,7 @@ const ADMIN_NAV=[
   {id:"reports",label:"Reports",icon:"⊞"},
   {id:"users",label:"User Management",icon:"◉",section:"Admin"},
   {id:"bankstatement",label:"Bank Statement Import",icon:"📄"},
+  {id:"assistant",label:"AI Data Entry",icon:"✦"},
 ];
 const GROUP_NAV=[{id:"dashboard",label:"Dashboard",icon:"▦"},{id:"receipts",label:"Client Receipts",icon:"◑"},{id:"payments",label:"Payments to Ascentix",icon:"◷"}];
 const LLC_NAV=[{id:"dashboard",label:"Dashboard",icon:"▦"},{id:"jobs",label:"Work Orders",icon:"◎"},{id:"receipts",label:"Client Receipts",icon:"◑"},{id:"payments",label:"Payments to Ascentix",icon:"◷"}];
@@ -1375,7 +1376,7 @@ const LLC_NAV=[{id:"dashboard",label:"Dashboard",icon:"▦"},{id:"jobs",label:"W
 function AdminApp({data,onSave,showToast,currentUser,onLogout,toast}){
   const [nav,setNav]=useState("dashboard");
   const props={data,onSave,showToast,currentUser};
-  const pages={dashboard:<Dashboard {...props}/>,groups:<GroupsPage {...props}/>,llcs:<LLCsPage {...props}/>,jobs:<JobsPage {...props}/>,receipts:<ClientReceiptsPage {...props}/>,llcpayments:<LLCPaymentsPage {...props} viewLlcId={null}/>,expenses:<ExpensesPage {...props}/>,payroll:<PayrollPage {...props}/>,capital:<CapitalPage {...props}/>,    reports:<ReportsPage {...props}/>,users:<UserManagementPage {...props}/>,bankstatement:<BankStatementPage {...props}/>};
+  const pages={dashboard:<Dashboard {...props}/>,groups:<GroupsPage {...props}/>,llcs:<LLCsPage {...props}/>,jobs:<JobsPage {...props}/>,receipts:<ClientReceiptsPage {...props}/>,llcpayments:<LLCPaymentsPage {...props} viewLlcId={null}/>,expenses:<ExpensesPage {...props}/>,payroll:<PayrollPage {...props}/>,capital:<CapitalPage {...props}/>,    reports:<ReportsPage {...props}/>,users:<UserManagementPage {...props}/>,bankstatement:<BankStatementPage {...props}/>,assistant:<AIAssistantPage {...props}/>};
   let currentSection=null;
   return <div style={{display:"flex",minHeight:"100vh",background:C.bg,fontFamily:"system-ui,-apple-system,sans-serif",fontSize:"14px",lineHeight:1.5}}>
     <nav style={{width:"210px",borderRight:`1px solid ${C.border}`,background:C.card,display:"flex",flexDirection:"column",flexShrink:0,padding:"14px 10px"}}>
