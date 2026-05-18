@@ -6,6 +6,8 @@ const FB_EMAIL   = "service@ascentix.com";
 const FB_PASS    = "AscentixService2025!";
 let _fbToken = null, _fbExpiry = 0;
 
+const SKEY_LOCAL = "ascentix-v6";
+
 async function getFBToken() {
   if (_fbToken && Date.now() < _fbExpiry) return _fbToken;
   try {
@@ -20,7 +22,8 @@ async function getFBToken() {
 }
 
 const SAMPLE = {
-  groups:[], llcs:[], jobs:[], ins:[], usaExp:[], bdExp:[],
+  groups:[{ id:"g1", name:"ZIC", contactName:"", email:"", phone:"", notes:"" }],
+  llcs:[{ id:"l1", name:"Pineview Property Care LLC", state:"VA", owner:"", email:"", model:"owner", ar:30, or:70, groupId:"g1", active:true, mgmtFeeType:"pct_rev", mgmtFeeValue:8 }], jobs:[], ins:[], usaExp:[], bdExp:[],
   capital:[], receipts:[], llcPayments:[], employees:[], payroll:[], bonusPool:[],
   users:[{ id:"usr1", username:"admin", password:"admin123", role:"admin", name:"Ascentix Admin", email:"admin@ascentix.com.bd", llcId:null, groupId:null }],
   settings:{ xRate:110, reportEmail:"" }
@@ -1055,8 +1058,274 @@ function LLCOwnerJobsView({data,currentUser}){
   </div>;}
 
 // ══════════════════════════════════════════════════════
-// LOGIN
+// BANK STATEMENT ANALYSER
 // ══════════════════════════════════════════════════════
+const STMT_CATS=[
+  {id:"client_receipt",label:"Client Receipt",color:"green",desc:"Money received from clients"},
+  {id:"vendor_payment",label:"Vendor Payment",color:"red",desc:"Payment to vendor/contractor"},
+  {id:"insurance_payment",label:"Insurance Payment",color:"amber",desc:"Insurance premium"},
+  {id:"usa_expense",label:"USA Operational Expense",color:"blue",desc:"CPA, software, formation fees"},
+  {id:"ascentix_payment",label:"Payment to Ascentix",color:"purple",desc:"Management fee or profit share"},
+  {id:"ignore",label:"Ignore",color:"gray",desc:"Bank fee, transfer, non-business"},
+];
+
+function BankStatementPage({data,onSave,showToast}){
+  const [llcId,setLlcId]=useState("");
+  const [file,setFile]=useState(null);
+  const [analyzing,setAnalyzing]=useState(false);
+  const [results,setResults]=useState(null);
+  const [approved,setApproved]=useState({});
+  const [editMap,setEditMap]=useState({});
+  const [saved,setSaved]=useState(false);
+
+  const readFile=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(f);});
+
+  const analyze=async()=>{
+    if(!llcId){showToast("Select an LLC first","error");return;}
+    if(!file){showToast("Upload a bank statement","error");return;}
+    setAnalyzing(true);setResults(null);
+    try{
+      const b64=await readFile(file);
+      const llc=data.llcs.find(l=>l.id===llcId);
+      const isPDF=file.type==="application/pdf";
+      const contentBlock=isPDF
+        ?{type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}}
+        :{type:"image",source:{type:"base64",media_type:file.type,data:b64}};
+
+      const prompt=`You are an accountant analysing a bank statement for ${llc.name} (a US property management LLC).
+
+Analyse every transaction and categorise it. Return ONLY valid JSON — no markdown, no explanation:
+
+{
+  "summary": "Statement period and overview e.g. April 2025 — 12 credits totalling $8,400 / 7 debits totalling $3,200",
+  "transactions": [
+    {
+      "id": "t1",
+      "date": "YYYY-MM-DD",
+      "description": "Transaction description from statement",
+      "amount": 1500.00,
+      "flow": "credit",
+      "category": "client_receipt",
+      "client": "Client or payer name if identifiable",
+      "vendor": "Vendor or payee name if identifiable",
+      "method": "ACH or Check or Wire or Zelle or Cash or Other",
+      "expenseCat": "CPA or LLC Formation or Software or Other — only if category is usa_expense",
+      "paymentType": "Monthly Management Fee or Service Fee or Profit Sharing — only if category is ascentix_payment",
+      "ref": "Reference number from statement if visible",
+      "notes": "Any useful notes"
+    }
+  ]
+}
+
+Categories to use:
+- client_receipt: credits from clients paying invoices
+- vendor_payment: debits to vendors, contractors, plumbers, electricians etc.
+- insurance_payment: insurance premium payments
+- usa_expense: CPA fees, software subscriptions, LLC formation, other operational costs
+- ascentix_payment: management fees or profit sharing paid to Ascentix
+- ignore: bank fees, internal transfers, tax payments, unidentifiable
+
+Be thorough — extract every transaction on the statement.`;
+
+      const resp=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",
+          max_tokens:4000,
+          messages:[{role:"user",content:[contentBlock,{type:"text",text:prompt}]}]
+        })
+      });
+      const rd=await resp.json();
+      const raw=rd.content.map(c=>c.text||"").join("");
+      const clean=raw.replace(/```json|```/g,"").trim();
+      const parsed=JSON.parse(clean);
+
+      // Ensure IDs are unique
+      parsed.transactions.forEach((t,i)=>{if(!t.id)t.id=`t${i+1}`;});
+
+      setResults(parsed);
+      // Default: approve all non-ignore
+      const ap={};parsed.transactions.forEach(t=>{ap[t.id]=t.category!=="ignore";});
+      setApproved(ap);
+      setEditMap({});setSaved(false);
+    }catch(e){
+      console.error(e);
+      showToast("Analysis failed — check the file and try again","error");
+    }
+    setAnalyzing(false);
+  };
+
+  const setEdit=(id,k,v)=>setEditMap(p=>({...p,[id]:{...p[id],[k]:v}}));
+  const getField=(t,k)=>editMap[t.id]?.[k]!==undefined?editMap[t.id][k]:t[k];
+
+  const saveAll=()=>{
+    const toSave=results.transactions.filter(t=>approved[t.id]&&getField(t,"category")!=="ignore");
+    if(toSave.length===0){showToast("No entries selected to save","error");return;}
+
+    let receipts=[...data.receipts];
+    let usaExp=[...data.usaExp];
+    let llcPayments=[...data.llcPayments];
+    let ins=[...data.ins];
+
+    toSave.forEach(t=>{
+      const cat=getField(t,"category");
+      const date=getField(t,"date");
+      const amount=+getField(t,"amount")||0;
+      const desc=getField(t,"description");
+      const method=getField(t,"method")||"ACH";
+      const ref=getField(t,"ref")||`STMT-${date}`;
+
+      if(cat==="client_receipt"){
+        receipts.push({id:uid(),llcId,client:getField(t,"client")||desc,date,totalAmount:amount,method,ref,desc,allocations:[]});
+      } else if(cat==="vendor_payment"||cat==="insurance_payment"){
+        usaExp.push({id:uid(),llcId,cat:cat==="insurance_payment"?"Other":"Other",amount,date,desc:`${getField(t,"vendor")||desc}`});
+      } else if(cat==="usa_expense"){
+        usaExp.push({id:uid(),llcId,cat:getField(t,"expenseCat")||"Other",amount,date,desc});
+      } else if(cat==="ascentix_payment"){
+        llcPayments.push({id:uid(),llcId,type:getField(t,"paymentType")||"Monthly Management Fee",amount,date,method,ref,desc,recordedBy:"bank_statement_import",doc:null});
+      }
+    });
+
+    onSave("receipts",receipts);
+    onSave("usaExp",usaExp);
+    onSave("llcPayments",llcPayments);
+    setSaved(true);
+    showToast(`✓ ${toSave.length} entries saved to the system`);
+  };
+
+  const llc=data.llcs.find(l=>l.id===llcId);
+  const approvedCount=results?results.transactions.filter(t=>approved[t.id]&&getField(t,"category")!=="ignore").length:0;
+
+  return <div>
+    {/* Upload card */}
+    <div style={card}>
+      <div style={{fontSize:"15px",fontWeight:600,color:C.text,marginBottom:"4px"}}>Bank Statement Analyser</div>
+      <div style={{fontSize:"12px",color:C.textMuted,marginBottom:"16px"}}>Upload a bank statement (PDF or image) · Claude will extract and categorise every transaction · you review before saving</div>
+      <G3>
+        <Field label="LLC *">
+          <select style={sel} value={llcId} onChange={e=>{setLlcId(e.target.value);setResults(null);setSaved(false);}}>
+            <option value="">Select LLC...</option>
+            {data.llcs.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Bank Statement (PDF or image) *">
+          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" style={{fontSize:"12px",padding:"6px 0"}}
+            onChange={e=>{setFile(e.target.files[0]||null);setResults(null);setSaved(false);}} />
+          {file&&<div style={{fontSize:"11px",color:C.green,marginTop:"3px"}}>✓ {file.name} ({(file.size/1024).toFixed(0)}KB)</div>}
+        </Field>
+        <Field label=" ">
+          <button style={{...btnP,height:"38px",marginTop:"4px"}} onClick={analyze} disabled={analyzing||!llcId||!file}>
+            {analyzing?"🔍 Analysing...":"🔍 Analyse with Claude"}
+          </button>
+        </Field>
+      </G3>
+      {analyzing&&<div style={{marginTop:"16px",padding:"14px",background:C.indigoBg,borderRadius:"8px",fontSize:"13px",color:C.indigoText,display:"flex",alignItems:"center",gap:"10px"}}>
+        <div style={{width:"16px",height:"16px",border:`2px solid ${C.indigo}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}} />
+        Claude is reading and analysing your bank statement...
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>}
+    </div>
+
+    {/* Results */}
+    {results&&<div>
+      {/* Summary */}
+      <div style={{...card,borderLeft:`4px solid ${C.indigo}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div>
+            <div style={{fontSize:"15px",fontWeight:700,color:C.text}}>{llc?.name} — Statement Analysis</div>
+            <div style={{fontSize:"13px",color:C.textMuted,marginTop:"4px"}}>{results.summary}</div>
+          </div>
+          <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+            <div style={{textAlign:"right"}}><div style={{fontSize:"11px",color:C.textMuted}}>Transactions found</div><div style={{fontSize:"20px",fontWeight:700,color:C.indigo}}>{results.transactions.length}</div></div>
+            <div style={{textAlign:"right"}}><div style={{fontSize:"11px",color:C.textMuted}}>Selected to save</div><div style={{fontSize:"20px",fontWeight:700,color:C.green}}>{approvedCount}</div></div>
+          </div>
+        </div>
+        {/* Category summary */}
+        <div style={{display:"flex",flexWrap:"wrap",gap:"8px",marginTop:"12px"}}>
+          {STMT_CATS.filter(c=>c.id!=="ignore").map(c=>{
+            const cnt=results.transactions.filter(t=>t.category===c.id).length;
+            if(!cnt)return null;
+            return <div key={c.id} style={{...badge(c.color),padding:"4px 10px",fontSize:"12px"}}>{c.label}: {cnt}</div>;
+          })}
+          {results.transactions.filter(t=>t.category==="ignore").length>0&&
+            <div style={{...badge("gray"),padding:"4px 10px",fontSize:"12px"}}>Ignored: {results.transactions.filter(t=>t.category==="ignore").length}</div>
+          }
+        </div>
+      </div>
+
+      {/* Transaction review table */}
+      <div style={card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+          <div><div style={{fontSize:"15px",fontWeight:600,color:C.text}}>Review Entries</div><div style={{fontSize:"12px",color:C.textMuted}}>Edit categories or details if needed · uncheck entries you don't want to save</div></div>
+          <div style={{display:"flex",gap:"8px"}}>
+            <button style={btnS} onClick={()=>{const ap={};results.transactions.forEach(t=>{ap[t.id]=true;});setApproved(ap);}}>Select All</button>
+            <button style={btnS} onClick={()=>{const ap={};results.transactions.forEach(t=>{ap[t.id]=false;});setApproved(ap);}}>Deselect All</button>
+          </div>
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:"12px"}}>
+          <thead><tr>{["✓","Date","Description","Amount","Flow","Category","Client/Vendor","Method"].map(h=><th key={h} style={{...th,fontSize:"11px"}}>{h}</th>)}</tr></thead>
+          <tbody>
+            {results.transactions.map(t=>{
+              const cat=getField(t,"category");
+              const catInfo=STMT_CATS.find(c=>c.id===cat)||STMT_CATS[5];
+              const isApproved=approved[t.id];
+              const flow=t.flow||"credit";
+              return <tr key={t.id} style={{opacity:isApproved?1:0.45,background:isApproved?"transparent":"#fafafa"}}>
+                <td style={{...td,width:"36px",textAlign:"center"}}>
+                  <input type="checkbox" checked={!!isApproved} onChange={e=>setApproved(p=>({...p,[t.id]:e.target.checked}))} />
+                </td>
+                <td style={{...td,whiteSpace:"nowrap",fontSize:"11px"}}>{fmtDate(getField(t,"date"))}</td>
+                <td style={{...td,maxWidth:"180px"}}>
+                  <div style={{fontSize:"12px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getField(t,"description")}</div>
+                  {getField(t,"ref")&&<div style={{fontSize:"10px",color:C.textMuted,fontFamily:"monospace"}}>{getField(t,"ref")}</div>}
+                </td>
+                <td style={{...td,fontWeight:600,color:flow==="credit"?C.green:C.red,whiteSpace:"nowrap"}}>
+                  {flow==="credit"?"+":"-"}{fmt$(+getField(t,"amount")||0)}
+                </td>
+                <td style={td}><span style={badge(flow==="credit"?"green":"red")}>{flow}</span></td>
+                <td style={{...td,minWidth:"160px"}}>
+                  <select style={{...sel,padding:"3px 6px",fontSize:"11px"}} value={cat}
+                    onChange={e=>setEdit(t.id,"category",e.target.value)}>
+                    {STMT_CATS.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+                  </select>
+                </td>
+                <td style={{...td,minWidth:"130px"}}>
+                  <input style={{...inp,padding:"3px 6px",fontSize:"11px"}}
+                    value={cat==="client_receipt"?getField(t,"client")||"":getField(t,"vendor")||""}
+                    placeholder={cat==="client_receipt"?"Client name...":"Vendor name..."}
+                    onChange={e=>setEdit(t.id,cat==="client_receipt"?"client":"vendor",e.target.value)} />
+                </td>
+                <td style={{...td,minWidth:"100px"}}>
+                  <select style={{...sel,padding:"3px 6px",fontSize:"11px"}} value={getField(t,"method")||"ACH"}
+                    onChange={e=>setEdit(t.id,"method",e.target.value)}>
+                    {PAY_METHODS.map(m=><option key={m} value={m}>{m}</option>)}
+                  </select>
+                </td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Save bar */}
+      {!saved&&<div style={{...card,background:"#f0fdf4",borderColor:"#6ee7b7",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontSize:"14px",fontWeight:600,color:C.greenText}}>{approvedCount} entries ready to save</div>
+          <div style={{fontSize:"12px",color:C.green,marginTop:"2px"}}>Client receipts → Receipts · Vendor/insurance/USA expenses → USA Expenses · Ascentix payments → LLC Payments</div>
+        </div>
+        <button style={{...btnP,background:C.green,padding:"10px 24px",fontSize:"14px"}} onClick={saveAll}>
+          ✓ Save {approvedCount} Entries to System
+        </button>
+      </div>}
+      {saved&&<div style={{...card,background:"#f0fdf4",borderColor:"#6ee7b7",textAlign:"center",padding:"20px"}}>
+        <div style={{fontSize:"16px",fontWeight:700,color:C.green,marginBottom:"6px"}}>✓ Entries saved successfully!</div>
+        <div style={{fontSize:"13px",color:C.textMuted,marginBottom:"12px"}}>All approved transactions have been added to the system. Note: client receipts have been saved without invoice allocation — go to Client Receipts to allocate them to specific invoices.</div>
+        <button style={btnP} onClick={()=>{setResults(null);setFile(null);setSaved(false);}}>Upload Another Statement</button>
+      </div>}
+    </div>}
+  </div>;
+}
 function LoginPage({onLogin,toast}){
   const [un,setUn]=useState("");const[pw,setPw]=useState("");const[showPw,setShowPw]=useState(false);
   return <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,-apple-system,sans-serif",padding:"20px"}}>
@@ -1098,6 +1367,7 @@ const ADMIN_NAV=[
   {id:"capital",label:"Working Capital",icon:"◫"},
   {id:"reports",label:"Reports",icon:"⊞"},
   {id:"users",label:"User Management",icon:"◉",section:"Admin"},
+  {id:"bankstatement",label:"Bank Statement Import",icon:"📄"},
 ];
 const GROUP_NAV=[{id:"dashboard",label:"Dashboard",icon:"▦"},{id:"receipts",label:"Client Receipts",icon:"◑"},{id:"payments",label:"Payments to Ascentix",icon:"◷"}];
 const LLC_NAV=[{id:"dashboard",label:"Dashboard",icon:"▦"},{id:"jobs",label:"Work Orders",icon:"◎"},{id:"receipts",label:"Client Receipts",icon:"◑"},{id:"payments",label:"Payments to Ascentix",icon:"◷"}];
@@ -1105,7 +1375,7 @@ const LLC_NAV=[{id:"dashboard",label:"Dashboard",icon:"▦"},{id:"jobs",label:"W
 function AdminApp({data,onSave,showToast,currentUser,onLogout,toast}){
   const [nav,setNav]=useState("dashboard");
   const props={data,onSave,showToast,currentUser};
-  const pages={dashboard:<Dashboard {...props}/>,groups:<GroupsPage {...props}/>,llcs:<LLCsPage {...props}/>,jobs:<JobsPage {...props}/>,receipts:<ClientReceiptsPage {...props}/>,llcpayments:<LLCPaymentsPage {...props} viewLlcId={null}/>,expenses:<ExpensesPage {...props}/>,payroll:<PayrollPage {...props}/>,capital:<CapitalPage {...props}/>,reports:<ReportsPage {...props}/>,users:<UserManagementPage {...props}/>};
+  const pages={dashboard:<Dashboard {...props}/>,groups:<GroupsPage {...props}/>,llcs:<LLCsPage {...props}/>,jobs:<JobsPage {...props}/>,receipts:<ClientReceiptsPage {...props}/>,llcpayments:<LLCPaymentsPage {...props} viewLlcId={null}/>,expenses:<ExpensesPage {...props}/>,payroll:<PayrollPage {...props}/>,capital:<CapitalPage {...props}/>,    reports:<ReportsPage {...props}/>,users:<UserManagementPage {...props}/>,bankstatement:<BankStatementPage {...props}/>};
   let currentSection=null;
   return <div style={{display:"flex",minHeight:"100vh",background:C.bg,fontFamily:"system-ui,-apple-system,sans-serif",fontSize:"14px",lineHeight:1.5}}>
     <nav style={{width:"210px",borderRight:`1px solid ${C.border}`,background:C.card,display:"flex",flexDirection:"column",flexShrink:0,padding:"14px 10px"}}>
