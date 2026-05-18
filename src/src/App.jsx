@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const FB_API_KEY = "AIzaSyAhz84dlb1A-oCLOX-Vm1fRqKBNj1s4mh8";
 const FB_DB      = "https://ascentix-51271-default-rtdb.firebaseio.com";
